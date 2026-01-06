@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BALANCE Algorithm Visualization</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+    <div class="container">
+        <h1>BALANCE Algorithm Performance Dashboard</h1>
+
+        <div class="card">
+            <h2>Configuration</h2>
+            <form id="config-form">
+                <div class="form-grid">
+                    <div class="form-group">
+                        <label for="num_clients">Number of Clients:</label>
+                        <input type="number" id="num_clients" value="4" min="2" max="20">
+                    </div>
+                    <div class="form-group">
+                        <label for="malicious_pct">Malicious Clients (%):</label>
+                        <input type="number" id="malicious_pct" value="25" min="0" max="50">
+                    </div>
+                    <div class="form-group">
+                        <label for="attack_type">Attack Type:</label>
+                        <select id="attack_type">
+                            <option value="sign_flip">Sign Flip</option>
+                            <option value="random_noise">Random Noise</option>
+                            <option value="label_flip">Label Flip</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="comparison_agg">Comparison Method:</label>
+                        <select id="comparison_agg">
+                            <option value="fedavg">FedAvg</option>
+                            <option value="krum">Krum</option>
+                            <option value="median">Median</option>
+                            <option value="trim">Trimmed Mean</option>
+                        </select>
+                    </div>
+                </div>
+                <button type="submit" id="run-button">Run Simulation</button>
+            </form>
+        </div>
+
+        <div class="card">
+            <h2>Client Network (Decentralized)</h2>
+            <div class="network-container">
+                <canvas id="network-canvas" width="400" height="300"></canvas>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>Metrics Dashboard</h2>
+            <div class="charts-grid">
+                <div class="chart-card">
+                    <h3>Max Test Error Rate (TER)</h3>
+                    <canvas id="ter-chart"></canvas>
+                </div>
+                <div class="chart-card">
+                    <h3>Attack Success Rate (ASR)</h3>
+                    <canvas id="asr-chart"></canvas>
+                </div>
+                <div class="chart-card">
+                    <h3>Consensus Error</h3>
+                    <canvas id="consensus-chart"></canvas>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>Detection Results</h2>
+            <div class="table-container">
+                <table id="results-table">
+                    <thead>
+                        <tr>
+                            <th>Client ID</th>
+                            <th>True Label</th>
+                            <th>Detected Label</th>
+                            <th>Attack Type</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <!-- Rows will be populated by JS -->
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>

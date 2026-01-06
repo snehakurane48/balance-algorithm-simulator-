@@ -21,6 +21,8 @@ from typing import Dict, List, Tuple
 import csv
 from PIL import Image
 import pandas as pd
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import networkx as nx
 import numpy as np
@@ -30,6 +32,9 @@ import torch.optim as optim
 import torch.utils.data as data
 import torchvision
 import torchvision.transforms as transforms
+import datetime
+from sklearn.metrics import confusion_matrix, accuracy_score
+from .database import SimulationRun, Client, RoundMetric, get_session
 
 # ---------------------------
 # Model (dynamic flattening)
@@ -274,6 +279,24 @@ class BalanceClient:
             out = self.model(x_batch)
             return torch.argmax(out, dim=1).cpu()
 
+    def get_confusion_matrix(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Compute confusion matrix and per-class accuracy on test set."""
+        self.model.eval()
+        all_preds = []
+        all_labels = []
+        with torch.no_grad():
+            for x, y in self.testloader:
+                x = x.to(self.device)
+                y = y.to(self.device)
+                out = self.model(x)
+                preds = torch.argmax(out, dim=1).cpu().numpy()
+                all_preds.extend(preds)
+                all_labels.extend(y.cpu().numpy())
+        all_preds = np.array(all_preds)
+        all_labels = np.array(all_labels)
+        cm = confusion_matrix(all_labels, all_preds, labels=list(range(5)))
+        return cm, all_labels, all_preds
+
 # ---------------------------
 # Backdoor trigger utilities
 # ---------------------------
@@ -378,6 +401,18 @@ def save_plot(xs, ys, title, ylabel, fname):
     plt.savefig(fname)
     plt.close()
 
+def save_confusion_matrix_plot(cm: np.ndarray, labels: List[str], fname: str):
+    """Save confusion matrix as a heatmap image."""
+    import seaborn as sns
+    plt.figure(figsize=(8, 6))
+    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", xticklabels=labels, yticklabels=labels, cbar_kws={"label": "Count"})
+    plt.title("Confusion Matrix")
+    plt.ylabel("True Label")
+    plt.xlabel("Predicted Label")
+    plt.tight_layout()
+    plt.savefig(fname, dpi=150)
+    plt.close()
+
 # ---------------------------
 # APTOS Dataset class
 
@@ -412,6 +447,9 @@ def simulate(
     seed: int = 42,
     trim_frac: float = 0.2,
     krum_f: int = 1,
+    csv_path: str = None,
+    img_dir: str = None,
+    debug_size: int = None,
 ):
     random.seed(seed)
     np.random.seed(seed)
@@ -426,14 +464,23 @@ def simulate(
         transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
     ])
 
-    csv_path = "/home/priyanka/flwr_app/my-awesome-app/data/train.csv"
-    img_dir = "/home/priyanka/flwr_app/my-awesome-app/data/train_images"
+    # Default dataset paths (point to included `data/archive/` files)
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    csv_default = os.path.join(base_dir, "data", "archive", "train.csv")
+    img_default = os.path.join(base_dir, "data", "archive", "train_images", "train_images")
 
-    full_dataset = APTOSDataset(csv_path, img_dir, transform=transform)
+    csv_to_use = csv_path if csv_path else csv_default
+    img_dir_to_use = img_dir if img_dir else img_default
+
+    full_dataset = APTOSDataset(
+        csv_file=csv_to_use,
+        img_dir=img_dir_to_use,
+        transform=transform,
+    )
 
     # Limit dataset size if debug_size is set
-    if args.debug_size is not None:
-        full_dataset = torch.utils.data.Subset(full_dataset, list(range(min(args.debug_size, len(full_dataset)))))
+    if debug_size is not None:
+        full_dataset = torch.utils.data.Subset(full_dataset, list(range(min(debug_size, len(full_dataset)))))
 
 
     # Split into train/test (80/20)
@@ -483,11 +530,12 @@ def simulate(
     consensus_list = []
     avg_benign_list = []
     avg_all_list = []
+    per_client_accuracy_history = {i: [] for i in range(num_clients)}  # Track accuracy per client per round
 
     print(f"Start sim: clients={num_clients}, malicious={len(malicious_ids)}, attack={attack_type}, agg={agg}")
     print("Malicious ids:", sorted(list(malicious_ids)))
     asr_history = {}
-    import os, datetime
+    # use top-level `os` and `datetime` imports
 
     # --- Create timestamped results folder ---
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M")
@@ -496,6 +544,33 @@ def simulate(
     os.makedirs(base_dir, exist_ok=True)
     plots_dir = os.path.join(base_dir, "plots")
     os.makedirs(plots_dir, exist_ok=True)
+
+    # --- Save simulation run to database ---
+    session = get_session()
+    sim_run = SimulationRun(
+        timestamp=datetime.datetime.now(),
+        algorithm=agg,
+        num_clients=num_clients,
+        num_malicious=num_malicious,
+        attack_type=attack_type,
+        num_rounds=rounds,
+        dataset='aptos'
+    )
+    session.add(sim_run)
+    session.commit()
+
+    # Save clients to database
+    db_clients = []
+    for i, client in enumerate(clients):
+        db_client = Client(
+            simulation_run_id=sim_run.id,
+            client_id=i,
+            is_malicious=client.is_malicious,
+            attack_type=client.attack_type
+        )
+        session.add(db_client)
+        db_clients.append(db_client)
+    session.commit()
 
     for t in range(rounds):
         # local train
@@ -548,6 +623,10 @@ def simulate(
         avg_all = float(np.mean(accs))
         avg_benign = float(np.mean(benign_accs)) if benign_accs else 0.0
 
+        # Track per-client accuracy
+        for i, acc in enumerate(accs):
+            per_client_accuracy_history[i].append(acc)
+
         rounds_list.append(t + 1)
         max_ter_list.append(max_ter)
         max_asr_list.append(max_asr)
@@ -557,6 +636,22 @@ def simulate(
 
         if (t + 1) % max(1, rounds // 10) == 0 or t == rounds - 1:
             print(f"Round {t+1}/{rounds} - Max.TER={max_ter:.4f} Max.ASR={max_asr:.4f} Consensus={consensus:.4f} AvgBenign={avg_benign:.4f}")
+
+        # Save round metrics to database
+        for i, client in enumerate(clients):
+            asr_val = asr_per_clients.get(i, 0.0) if isinstance(asr_per_clients, dict) else next((val for cid, val in asr_per_clients if cid == i), 0.0)
+            metric = RoundMetric(
+                simulation_run_id=sim_run.id,
+                client_id=db_clients[i].id,
+                round_number=t + 1,
+                train_loss=client.train_loss if hasattr(client, 'train_loss') else None,
+                eval_loss=None,  # Could be added if available
+                eval_accuracy=accs[i],
+                num_examples=len(client.testset),
+                asr=asr_val
+            )
+            session.add(metric)
+        session.commit()
     
     # Save each client's final trained model
     """for i, c in enumerate(clients):
@@ -565,6 +660,30 @@ def simulate(
     print("Simulation complete.")"""
 
     save_asr_curves(asr_history, rounds_list, output_dir=plots_dir)
+
+    # Export per-client accuracy tracking CSV
+    acc_csv = os.path.join(base_dir, f"per_client_accuracy_{agg}_clients{num_clients}_atk{attack_type}.csv")
+    with open(acc_csv, "w", newline="") as f:
+        writer = csv.writer(f)
+        header = ["round"] + [f"client_{cid}" for cid in range(num_clients)]
+        writer.writerow(header)
+        for ridx, r in enumerate(rounds_list):
+            row = [r] + [per_client_accuracy_history[cid][ridx] for cid in range(num_clients)]
+            writer.writerow(row)
+    print(f"Saved per-client accuracy → {acc_csv}")
+
+    # Compute and save confusion matrices for each benign client (final round)
+    for i in range(num_clients):
+        if i in malicious_ids:
+            continue  # Skip malicious clients
+        cm, true_labels, pred_labels = clients[i].get_confusion_matrix()
+        # Save confusion matrix as heatmap
+        cm_plot = os.path.join(plots_dir, f"confusion_matrix_client_{i}.png")
+        save_confusion_matrix_plot(cm, labels=[str(j) for j in range(5)], fname=cm_plot)
+        # Save confusion matrix CSV
+        cm_csv = os.path.join(base_dir, f"confusion_matrix_client_{i}_{agg}.csv")
+        np.savetxt(cm_csv, cm, delimiter=",", fmt="%d")
+        print(f"Saved confusion matrix for client {i} → {cm_plot}")
 
     # also export per-client ASR CSV
     asr_csv = os.path.join(base_dir, f"asr_per_client_{agg}_clients{num_clients}_atk{attack_type}.csv")
@@ -608,7 +727,10 @@ if __name__ == "__main__":
     parser.add_argument("--trim_frac", type=float, default=0.2)
     parser.add_argument("--krum_f", type=int, default=1)
     parser.add_argument("--debug_size", type=int, default=None, help="Use only a subset of dataset for debugging")
+    parser.add_argument('--csv_path', type=str, default=None, help='Path to the CSV file')
+    parser.add_argument('--img_dir', type=str, default=None, help='Path to the images directory')
     args = parser.parse_args()
+
 
     simulate(
         num_clients=args.num_clients,
