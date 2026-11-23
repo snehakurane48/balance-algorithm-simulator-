@@ -4,7 +4,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from robustness_dashboard import group_runs_by_timestamp, robustness_dashboard_multi
+from robustness_dashboard import select_run_group, robustness_dashboard_multi
 
 
 @st.cache_data
@@ -76,13 +76,11 @@ def show_run(run_name: str):
 
 
 def generate_combined_dashboard():
-    grouped = group_runs_by_timestamp("results")
-    if not grouped:
-        st.warning("No runs found under ./results/. Run some simulations first.")
+    run_group = select_run_group(("results", "my_awesome_app/results"))
+    if not run_group:
+        st.warning("No compatible runs found under the available result folders. Run some simulations first.")
         return None
-    latest_ts = max(grouped.keys())
-    run_group = grouped[latest_ts]
-    st.info(f"Generating combined dashboard for timestamp group: {latest_ts} ({len(run_group)} runs)")
+    st.info(f"Generating combined dashboard for {len(run_group)} compatible runs")
 
     import robustness_dashboard as rb
 
@@ -93,7 +91,7 @@ def generate_combined_dashboard():
         pass
 
     robustness_dashboard_multi(run_group)
-    out_dir = Path(run_group[0]) / "plots"
+    out_dir = Path(__file__).resolve().parent.parent / "plots"
     out_pdf = out_dir / "robustness_dashboard_combined.pdf"
     out_png = out_dir / "robustness_dashboard_combined.png"
     return out_pdf if out_pdf.exists() else out_png if out_png.exists() else None

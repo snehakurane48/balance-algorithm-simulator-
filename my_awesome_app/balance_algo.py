@@ -21,8 +21,6 @@ from typing import Dict, List, Tuple
 import csv
 from PIL import Image
 import pandas as pd
-import matplotlib
-matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import networkx as nx
 import numpy as np
@@ -34,7 +32,6 @@ import torchvision
 import torchvision.transforms as transforms
 import datetime
 from sklearn.metrics import confusion_matrix, accuracy_score
-from .database import SimulationRun, Client, RoundMetric, get_session
 
 # ---------------------------
 # Model (dynamic flattening)
@@ -447,9 +444,6 @@ def simulate(
     seed: int = 42,
     trim_frac: float = 0.2,
     krum_f: int = 1,
-    csv_path: str = None,
-    img_dir: str = None,
-    debug_size: int = None,
 ):
     random.seed(seed)
     np.random.seed(seed)
@@ -469,8 +463,8 @@ def simulate(
     csv_default = os.path.join(base_dir, "data", "archive", "train.csv")
     img_default = os.path.join(base_dir, "data", "archive", "train_images", "train_images")
 
-    csv_to_use = csv_path if csv_path else csv_default
-    img_dir_to_use = img_dir if img_dir else img_default
+    csv_to_use = args.csv_path if (hasattr(args, "csv_path") and args.csv_path) else csv_default
+    img_dir_to_use = args.img_dir if (hasattr(args, "img_dir") and args.img_dir) else img_default
 
     full_dataset = APTOSDataset(
         csv_file=csv_to_use,
@@ -479,8 +473,8 @@ def simulate(
     )
 
     # Limit dataset size if debug_size is set
-    if debug_size is not None:
-        full_dataset = torch.utils.data.Subset(full_dataset, list(range(min(debug_size, len(full_dataset)))))
+    if args.debug_size is not None:
+        full_dataset = torch.utils.data.Subset(full_dataset, list(range(min(args.debug_size, len(full_dataset)))))
 
 
     # Split into train/test (80/20)
@@ -544,33 +538,6 @@ def simulate(
     os.makedirs(base_dir, exist_ok=True)
     plots_dir = os.path.join(base_dir, "plots")
     os.makedirs(plots_dir, exist_ok=True)
-
-    # --- Save simulation run to database ---
-    session = get_session()
-    sim_run = SimulationRun(
-        timestamp=datetime.datetime.now(),
-        algorithm=agg,
-        num_clients=num_clients,
-        num_malicious=num_malicious,
-        attack_type=attack_type,
-        num_rounds=rounds,
-        dataset='aptos'
-    )
-    session.add(sim_run)
-    session.commit()
-
-    # Save clients to database
-    db_clients = []
-    for i, client in enumerate(clients):
-        db_client = Client(
-            simulation_run_id=sim_run.id,
-            client_id=i,
-            is_malicious=client.is_malicious,
-            attack_type=client.attack_type
-        )
-        session.add(db_client)
-        db_clients.append(db_client)
-    session.commit()
 
     for t in range(rounds):
         # local train
@@ -636,22 +603,6 @@ def simulate(
 
         if (t + 1) % max(1, rounds // 10) == 0 or t == rounds - 1:
             print(f"Round {t+1}/{rounds} - Max.TER={max_ter:.4f} Max.ASR={max_asr:.4f} Consensus={consensus:.4f} AvgBenign={avg_benign:.4f}")
-
-        # Save round metrics to database
-        for i, client in enumerate(clients):
-            asr_val = asr_per_clients.get(i, 0.0) if isinstance(asr_per_clients, dict) else next((val for cid, val in asr_per_clients if cid == i), 0.0)
-            metric = RoundMetric(
-                simulation_run_id=sim_run.id,
-                client_id=db_clients[i].id,
-                round_number=t + 1,
-                train_loss=client.train_loss if hasattr(client, 'train_loss') else None,
-                eval_loss=None,  # Could be added if available
-                eval_accuracy=accs[i],
-                num_examples=len(client.testset),
-                asr=asr_val
-            )
-            session.add(metric)
-        session.commit()
     
     # Save each client's final trained model
     """for i, c in enumerate(clients):

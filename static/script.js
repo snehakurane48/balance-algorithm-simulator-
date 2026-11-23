@@ -13,6 +13,7 @@ function initCharts() {
     const ctxTer = document.getElementById('ter-chart').getContext('2d');
     terChart = new Chart(ctxTer, {
         type: 'line',
+
         data: {
             labels: [],
             datasets: [{

@@ -11,7 +11,7 @@ Usage:
     python my_awesome_app/robustness_dashboard.py
 """
 
-import os, csv, subprocess, platform
+import os, csv, subprocess, platform, re
 import numpy as np
 import matplotlib.pyplot as plt
 from datetime import datetime
@@ -59,15 +59,26 @@ def load_metrics_csv(path):
 def parse_run_info(name):
     parts = name.split("_")
     info = {"Timestamp": "?", "Aggregator": "?", "Clients": "?", "Malicious": "?", "Attack": "?"}
+    lower_name = name.lower()
+
+    if "sign_flip" in lower_name:
+        info["Attack"] = "sign_flip"
+    elif "random_noise" in lower_name:
+        info["Attack"] = "random_noise"
+    elif "label_flip" in lower_name:
+        info["Attack"] = "label_flip"
+    elif "atknone" in lower_name or "atknone" in lower_name:
+        info["Attack"] = "none"
+
     for p in parts:
-        if p.lower() in COLOR_MAP:
-            info["Aggregator"] = p.lower()
-        elif p.startswith("clients"):
+        p_lower = p.lower()
+        if p_lower in COLOR_MAP:
+            info["Aggregator"] = p_lower
+        elif p_lower.startswith("clients"):
             info["Clients"] = p.replace("clients", "")
-        elif p.startswith("mal"):
+        elif p_lower.startswith("mal"):
             info["Malicious"] = p.replace("mal", "")
-        elif p not in ["results", "plots"] and not p[0].isdigit():
-            info["Attack"] = p
+
     if len(parts) >= 2:
         info["Timestamp"] = parts[0] + "_" + parts[1]
     return info
@@ -103,6 +114,67 @@ def group_runs_by_timestamp(root="results"):
             grouped.setdefault(ts, []).append(os.path.join(root, r))
     return grouped
 
+def group_runs_by_config(root_dirs=("results", "my_awesome_app/results")):
+    """Group runs by experiment setup (clients, malicious, attack) across available result folders."""
+    grouped = {}
+    if isinstance(root_dirs, str):
+        root_dirs = (root_dirs,)
+
+    for root in root_dirs:
+        if not os.path.exists(root):
+            continue
+        for run_name in sorted(os.listdir(root)):
+            run_dir = os.path.join(root, run_name)
+            if not os.path.isdir(run_dir):
+                continue
+            info = parse_run_info(run_name)
+            key = (info["Clients"], info["Malicious"], info["Attack"])
+            grouped.setdefault(key, []).append(run_dir)
+
+    return grouped
+
+
+def select_run_group(root_dirs=("results", "my_awesome_app/results")):
+    """Select the largest run group that contains at least four aggregation methods."""
+    grouped = group_runs_by_config(root_dirs)
+    if not grouped:
+        return []
+
+    candidates = []
+    for key, run_group in grouped.items():
+        aggs = {
+            parse_run_info(os.path.basename(run_dir))["Aggregator"]
+            for run_dir in run_group
+            if parse_run_info(os.path.basename(run_dir))["Aggregator"] != "?"
+        }
+        if len(aggs) >= 4:
+            candidates.append((len(aggs), key, run_group))
+
+    if not candidates:
+        for key, run_group in grouped.items():
+            aggs = {
+                parse_run_info(os.path.basename(run_dir))["Aggregator"]
+                for run_dir in run_group
+                if parse_run_info(os.path.basename(run_dir))["Aggregator"] != "?"
+            }
+            candidates.append((len(aggs), key, run_group))
+
+    if not candidates:
+        return []
+
+    candidates.sort(key=lambda item: (item[0], item[1][0], item[1][1], item[1][2]), reverse=True)
+    selected = candidates[0][2]
+
+    priority = {agg: idx for idx, agg in enumerate(["balance", "fedavg", "trim", "median", "krum"])}
+    return sorted(
+        selected,
+        key=lambda run_dir: (
+            priority.get(parse_run_info(os.path.basename(run_dir))["Aggregator"], 100),
+            os.path.basename(run_dir),
+        ),
+    )
+
+
 def find_csvs(run_dir):
     asr_csv, metrics_csv = None, None
     for f in os.listdir(run_dir):
@@ -124,7 +196,8 @@ def robustness_dashboard_multi(run_group):
 
     timestamp = os.path.basename(run_group[0]).split("_")[0:2]
     timestamp = "_".join(timestamp)
-    out_dir = os.path.join(run_group[0], "plots")
+    workspace_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    out_dir = os.path.join(workspace_root, "plots")
     os.makedirs(out_dir, exist_ok=True)
     out_pdf = os.path.join(out_dir, "robustness_dashboard_combined.pdf")
     out_png = os.path.join(out_dir, "robustness_dashboard_combined.png")
@@ -180,13 +253,11 @@ def robustness_dashboard_multi(run_group):
 # ------------- entrypoint -------------
 
 if __name__ == "__main__":
-    grouped = group_runs_by_timestamp("results")
-    if not grouped:
-        print("⚠️ No runs found under ./results/. Run some simulations first.")
+    run_group = select_run_group(("results", "my_awesome_app/results"))
+    if not run_group:
+        print("⚠️ No compatible runs found. Run some simulations first.")
     else:
-        latest_ts = max(grouped.keys())
-        run_group = grouped[latest_ts]
-        print(f"📂 Detected {len(run_group)} runs under timestamp: {latest_ts}")
+        print(f"📂 Detected {len(run_group)} runs for comparison")
         for r in run_group:
             print("   └─", r)
         robustness_dashboard_multi(run_group)
